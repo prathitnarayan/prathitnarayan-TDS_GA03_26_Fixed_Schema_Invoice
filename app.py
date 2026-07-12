@@ -1,20 +1,10 @@
-import base64
-import io
 import os
+import json
 
-from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from PIL import Image
-
-import google.generativeai as genai
-
-load_dotenv()
-
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-
-model = genai.GenerativeModel("gemini-2.5-flash")
+from openai import OpenAI
 
 app = FastAPI()
 
@@ -26,38 +16,93 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-class Request(BaseModel):
+client = OpenAI(
+    api_key=os.environ["AIPIPE_TOKEN"],
+    base_url="https://aipipe.org/openai/v1"
+)
+
+
+class ImageRequest(BaseModel):
     image_base64: str
     question: str
 
-@app.post("/answer-image")
-async def answer_image(req: Request):
 
-    image_data = req.image_base64
-
-    # Remove data URL prefix if present
-    if "," in image_data:
-        image_data = image_data.split(",", 1)[1]
-
-    img = Image.open(
-        io.BytesIO(base64.b64decode(image_data))
-    )
-    prompt = f"""
-Answer ONLY the question.
-
-Question:
-{req.question}
+SYSTEM_PROMPT = """
+You answer questions about images.
 
 Rules:
-- Return only the answer.
-- If numeric, return only the number.
+- Return ONLY JSON.
+- Output format:
+
+{
+  "answer":"..."
+}
+
+- answer MUST always be a string.
+- If the answer is numeric, return only the number as a string.
+- Do not include currency symbols.
+- Do not include units.
+- No markdown.
 - No explanation.
 """
 
-    response = model.generate_content(
-        [prompt, img]
-    )
 
-    return {
-        "answer": response.text.strip()
-    }
+@app.get("/")
+def health():
+    return {"status": "ok"}
+
+
+@app.post("/answer-image")
+def answer_image(req: ImageRequest):
+
+    image_url = f"data:image/png;base64,{req.image_base64}"
+
+    try:
+
+        response = client.chat.completions.create(
+            model="gpt-4.1",
+            temperature=0,
+            response_format={
+                "type": "json_object"
+            },
+            messages=[
+                {
+                    "role": "system",
+                    "content": SYSTEM_PROMPT
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": req.question
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": image_url
+                            }
+                        }
+                    ]
+                }
+            ]
+        )
+
+        result = json.loads(
+            response.choices[0].message.content
+        )
+
+        answer = result.get("answer", "")
+
+        if answer is None:
+            answer = ""
+
+        return {
+            "answer": str(answer).strip()
+        }
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=str(e)
+        )
